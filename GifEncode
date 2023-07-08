@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+
+'''
+pip3 install pycryptodome
+'''
+
+import base64
+import random
+import argparse
+import os.path
+import hashlib
+import zipfile
+import tempfile
+    
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad, unpad
+except:
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Util.Padding import pad, unpad
+    
+CLEAN_KEY = ['PLZCHANGEMEFIRSTplzzitsreallybad']
+CLEAN_IV = ['REALLYPLZZCHANGE']
+    
+def get_header(rawdata, offset):
+    syntax =    [   
+                    ['Signature', 3],
+                    ['Version', 3]
+                ]
+    
+    outdata, remdata, pset = parser(syntax, rawdata)
+    return outdata, remdata, offset+pset
+
+def get_lsd(rawdata, offset):
+    syntax =    [   
+                    ['Logical Screen Width', 2],
+                    ['Logical Screen Height', 2],
+                    ['<Packed Fields>', 1],
+                    ['Background Color Index', 1],
+                    ['Pixel Aspect Ratio', 1]
+                ]
+    
+    outdata, remdata, pset = parser(syntax, rawdata)
+    
+    packed_syntax = [
+                        ['Global Color Table Flag', 1],
+                        ['Color Resolution', 3],
+                        ['Sort Flag', 1],
+                        ['Size of Global Color Table', 3]
+                     ]
+    
+    pdata = maskparser(packed_syntax, outdata['<Packed Fields>'])
+    for k in pdata:
+        outdata[k] = pdata[k]
+    
+    return outdata, remdata, offset+pset
+
+def get_colortable(rawdata, size, offset):
+    gct_size = 3 * ( 2**(size+1) )
+    gct = rawdata[:gct_size]
+    
+    return gct, rawdata[gct_size:], offset+gct_size
+
+def get_gc_ext(rawdata, offset):
+    gcheader_syntax =   [
+                            ['Extension Introducer', 1],
+                            ['Graphic Control Label', 1],
+                            ['Block Size', 1],
+                            ['<Packed Fields>', 1],
+                            ['Delay Time', 2],
+                            ['Transparent Color Index', 1],
+                            ['Block Terminator', 1]
+                        ]
+                        
+    gcinfo, remdata, pset = parser(gcheader_syntax, rawdata)
+    
+    packed_syntax = [
+                        ['Reserved', 3],
+                        ['Disposal Method', 3],
+                        ['User Input Flag', 1],
+                        ['Transparent Color Flag', 1]
+                     ]
+    
+    pdata = maskparser(packed_syntax, gcinfo['<Packed Fields>'])
+    for k in pdata:
+        gcinfo[k] = pdata[k]
+        
+    return gcinfo, remdata, offset+pset
+
+def get_com_ext(rawdata, offset):
+    com_header =    [
+                        ['Extension Introducer', 1],
+                        ['Comment Label', 1]
+                    ]
+                
+    cominfo, remdata, pset = parser(com_header, rawdata)
+    cominfo['Data Sub-blocks'] = []
+    
+    subset = 0
+    while(True):
+        if remdata[0] == 0:
+            remdata = remdata[1:]
+            subset += 1
+            break
+        size = remdata[0]
+        blockdata = remdata[1:size+1]
+        cominfo['Data Sub-blocks'].append([size, blockdata])
+        remdata = remdata[size+1:]
+        subset += size+1
+                    
+    return cominfo, remdata, offset+pset+subset
+    
+def get_pt_ext(rawdata, offset):
+    pt_header =    [
+                        ['Extension Introducer', 1],
+                        ['Plain Text Label', 1],
+                        ['Block Size', 1],
+                        ['Text Grid Left Position', 2],
+                        ['Text Grid Top Position', 2],
+                        ['Text Grid Width', 2],
+                        ['Text Grid Height', 2],
+                        ['Character Cell Width', 1],
+                        ['Character Cell Height', 1],
+                        ['Text Foreground Color Index', 1],
+                        ['Text Background Color Index', 1]
+                    ]
+                
+    ptinfo, remdata, pset = parser(pt_header, rawdata)
+    ptinfo['Data Sub-blocks'] = []
+    
+    subset = 0
+    while(True):
+        if remdata[0] == 0:
+            remdata = remdata[1:]
+            subset += 1
+            break
+        size = remdata[0]
+        blockdata = remdata[1:size+1]
+        ptinfo['Data Sub-blocks'].append([size, blockdata])
+        remdata = remdata[size+1:]
+        subset += size+1
+                    
+    return ptinfo, remdata, offset+pset+subset
+
+def get_app_ext(rawdata, offset):
+    app_header =    [
+                        ['Extension Introducer', 1],
+                        ['Extension Label', 1],
+                        ['Block Size', 1],
+                        ['Application Identifier', 8],
+                        ['Appl. Authentication Code', 3]
+                    ]
+                
+    appinfo, remdata, pset = parser(app_header, rawdata)
+    appinfo['Data Sub-blocks'] = []
+    
+    subset = 0
+    while(True):
+        if remdata[0] == 0:
+            remdata = remdata[1:]
+            subset += 1
+            break
+        size = remdata[0]
+        blockdata = remdata[1:size+1]
+        appinfo['Data Sub-blocks'].append([size, blockdata])
+        remdata = remdata[size+1:]
+        subset += size+1
+                    
+    return appinfo, remdata, offset+pset+subset
+
+def get_extension(rawdata, offset):
+    extheader_syntax =  [
+                            ['Extension Introducer', 1],
+                            ['Label', 1]
+                        ]
+    extheader, remdata, pset = parser(extheader_syntax, rawdata)
+    #print(extheader)
+    if extheader['Label'] == b'\xf9':
+        #Graphic Control Extension
+        extinfo, remdata, eset = get_gc_ext(rawdata, offset)
+    elif extheader['Label'] == b'\xfe':
+        #Comment Extension
+        extinfo, remdata, eset = get_com_ext(rawdata, offset)
+    elif extheader['Label'] == b'\x01':
+        #Plain Text Extension
+        extinfo, remdata, eset = get_pt_ext(rawdata, offset)
+    elif extheader['Label'] == b'\xff':
+        #Application Extension
+        extinfo, remdata, eset = get_app_ext(rawdata, offset)
+    else:
+        print('!!!UNKNOWN EXT!!!')
+        
+    for k in extheader:
+        extinfo[k] = extheader[k]
+        
+    return extinfo, remdata, eset
+
+def get_imagedesc(rawdata, offset):
+    imagedesc_syntax =  [
+                            ['Image Separator', 1],
+                            ['Image Left Position', 2],
+                            ['Image Top Position', 2],
+                            ['Image Width', 2],
+                            ['Image Height', 2],
+                            ['<Packed Fields>', 1],
+                        ]
+                        
+    imagedescinfo, remdata, pset = parser(imagedesc_syntax, rawdata)
+
+    packed_syntax = [
+                        ['Local Color Table Flag', 1],
+                        ['Interlace Flag', 1],
+                        ['Sort Flag', 1],
+                        ['Reserved', 2],
+                        ['Size of Local Color Table', 3]
+                     ]
+                     
+    pdata = maskparser(packed_syntax, imagedescinfo['<Packed Fields>'])
+    for k in pdata:
+        imagedescinfo[k] = pdata[k]
+        
+    return imagedescinfo, remdata, offset+pset
+    
+def get_image(rawdata, offset):
+    lzw_info =    [
+                        ['LZW Minimum Code Size', 1]
+                    ]
+                   
+    image_data, remdata, pset = parser(lzw_info, rawdata)
+    image_data['Data Sub-blocks'] = []
+                   
+    subset = 0
+    while(True):
+        if remdata[0] == 0:
+            remdata = remdata[1:]
+            subset += 1
+            break
+        size = remdata[0]
+        blockdata = remdata[1:size+1]
+        image_data['Data Sub-blocks'].append([size, blockdata])
+        remdata = remdata[size+1:]
+        subset += size+1
+        
+    return image_data, remdata, offset+pset+subset
+
+#Encode function largely lifted from PasteSend
+def encode_comment(indata, key, iv):
+    if not isinstance(key, bytes):
+        key = key.encode('ascii')
+    if not isinstance(iv, bytes):
+        iv = iv.encode('ascii')
+    
+    # Output the MD5 for verification
+    print('[+] MD5 of raw data: {}'.format(hashlib.md5(indata).hexdigest()))
+    print('[+] Original text:   {} bytes'.format(len(indata)))
+
+    # Create temp zip file
+    with tempfile.TemporaryDirectory() as tdir:
+        with open(os.path.join(tdir,'temp'), 'wb') as f:
+            f.write(indata)
+        with zipfile.ZipFile(os.path.join(tdir,'tpzip'), 'w', compression=zipfile.ZIP_LZMA) as tpzip:
+            tpzip.write(os.path.join(tdir,'temp'), arcname='temp')
+
+        with open(os.path.join(tdir,'tpzip'), 'rb') as tp:
+            zipdata = tp.read()
+
+    # Output the MD5 for the zip verification
+    print('[+] MD5 of zip data: {}'.format(hashlib.md5(zipdata).hexdigest()))
+    print('[+] Zip data:        {} bytes'.format(len(zipdata)))
+
+    # Encrypt with AES key/iv
+    aes_enc = AES.new(key, AES.MODE_CBC, iv=iv)
+    cipher_text = aes_enc.encrypt(pad(zipdata, AES.block_size))
+    # Convert to base64
+    b64text = base64.b64encode(cipher_text)
+    print('[+] MD5 of b64 data: {}'.format(hashlib.md5(b64text).hexdigest()))
+    print('[+] Encoded text:    {} characters'.format(len(b64text.decode('utf8'))))
+    
+    return b64text
+
+#Decode function largely lifted from PasteSend    
+def decode_comment(indata, key, iv):
+    if not isinstance(key, bytes):
+        key = key.encode('ascii')
+    if not isinstance(iv, bytes):
+        iv = iv.encode('ascii')
+        
+    # Base64 decode the text
+    print('[+] MD5 of b64 data: {}'.format(hashlib.md5(indata).hexdigest()))
+    cipher_text = base64.b64decode(indata)
+    print('[+] Encoded text:    {} characters'.format(len(indata)))
+
+    # Decrypt with the AES key/iv
+    try:
+        aes_dec = AES.new(key, AES.MODE_CBC, iv=iv)
+        zipdata = unpad(aes_dec.decrypt(cipher_text), AES.block_size)
+    except:
+        print('[!] Failed to decrypt with key/iv pair')
+        return ''
+    print('[+] MD5 of zip data: {}'.format(hashlib.md5(zipdata).hexdigest()))
+    print('[+] Zip data:        {} bytes'.format(len(zipdata)))
+
+    # Create temp zip file
+    with tempfile.TemporaryDirectory() as tdir:
+        with open(os.path.join(tdir,'tpzip'), 'wb') as tp:
+            tp.write(zipdata)
+
+        with zipfile.ZipFile(os.path.join(tdir,'tpzip'), 'r', compression=zipfile.ZIP_LZMA) as tpzip:
+            plain_text = tpzip.read('temp')
+
+            print('[+] MD5 of raw data: {}'.format(hashlib.md5(plain_text).hexdigest()))
+    print('[+] Original text:   {} bytes'.format(len(plain_text)))
+    
+    return plain_text
+
+def make_comment(indata, key, iv):
+    encodeddata = encode_comment(indata, key, iv)
+    introducer = b'\x21'
+    label = b'\xfe'
+    
+    comment_data = []
+    commentraw = b''
+    
+    while(encodeddata):
+        if len(encodeddata) > 255:
+            comment_data.append([255, encodeddata[:255]])
+            encodeddata = encodeddata[255:]
+        else:
+            comment_data.append([len(encodeddata), encodeddata])
+            encodeddata = ''
+            
+    for i in comment_data:
+        commentraw += i[0].to_bytes()
+        commentraw += i[1]
+    
+    terminator = b'\x00'
+    
+    return (introducer+label+commentraw+terminator)
+    
+def retrieve_comment(in_comment_data, key, iv):
+    ostring = b''
+    for i in in_comment_data['Data Sub-blocks']:
+        ostring += i[1]
+        
+    return decode_comment(ostring, key, iv)
+
+def maskparser(syntax, data):
+    outdata = {}
+    
+    c = 0
+    for s in syntax:
+        name = s[0]
+        size = s[1]
+        mask = int(size*'1', 2) << (8-c-size)
+        val = (int.from_bytes(data) & mask) >> (8-c-size)
+        outdata[name] = val
+        c += size
+    
+    return outdata
+
+def parser(syntax, data):
+    outdata = {}
+    
+    c = 0
+    for s in syntax:
+        name = s[0]
+        size = s[1]
+        val = data[c:c+size]
+        outdata[name] = val
+        c += size
+    
+    return outdata, data[c:], c
+
+def parse_gif(rawdata):
+    offset = 0
+    offset_info = {}
+
+    offset_info['header'] = offset
+    header_data, remdata, offset = get_header(rawdata, offset)
+
+    offset_info['lsd'] = offset
+    lsd_data, remdata, offset = get_lsd(remdata, offset)
+
+    if lsd_data['Global Color Table Flag']:
+        gct, remdata, offset = get_colortable(remdata, lsd_data['Size of Global Color Table'], offset)
+
+    while(True):
+        if remdata[0] == 0x21:
+            if not 0x21 in offset_info:
+                offset_info[0x21] = []
+            offset_info[0x21].append(offset)
+            ext_data, remdata, offset = get_extension(remdata, offset)
+        elif remdata[0] == 0x2c:
+            if not 0x2c in offset_info:
+                offset_info[0x2c] = []
+            offset_info[0x2c].append(offset)
+            imgdesc_data, remdata, offset = get_imagedesc(remdata, offset)
+            if imgdesc_data['Local Color Table Flag']:
+                lct, remdata, offset = get_colortable(remdata, imgdesc_data['Size of Local Color Table'], offset)
+            image_data, remdata, offset = get_image(remdata, offset)
+        elif remdata[0] == 0x3b:
+            #EOF
+            offset += 1
+            break
+        else:
+            print('Found bad trailing data!!!')
+            print(remdata[:1000])
+            break
+            
+    return offset_info
+    
+def find_comments(rawdata, offset_info, key, iv):
+    offsets = []
+    comments = []
+    for i in offset_info[0x21]:
+        #print(rawdata[i:i+100])
+        extinfo, remdata, eset = get_extension(rawdata[i:], i)
+        if not extinfo['Label'] == b'\xfe':
+            continue
+        print('[+] Found a comment at offset: {}'.format(i))
+        offsets.append([i,eset])
+        comments.append([i,retrieve_comment(extinfo, key, iv)])
+        
+    return offsets, comments
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-e', '--encode', action='store',
+                        help='Encode mode. Takes either a string or a filepath')
+    parser.add_argument('-d', '--decode', action='store_true',
+                        help='Decode mode. Finds comments and prints to screen')
+    parser.add_argument('-c', '--clean', action='store_true',
+                        help='Remove all comments from the file')
+    parser.add_argument('-x', '--extract', action='store_true',
+                        help='Extract mode. Finds comments and outputs to offset_args.newgif')
+    parser.add_argument('-i', '--infile', action='store', required=True,
+                        help='Input file')
+    parser.add_argument('-n', '--newgif', action='store',
+                        help='Output file for encoding (default is ORIGINAL_out.gif')
+                        
+    parser.add_argument('--key', action='store', nargs=1, default=CLEAN_KEY,
+                            help='The key for AES decryption. This can be a string (or hex of length 64)')
+    parser.add_argument('--iv', action='store', nargs=1, default=CLEAN_IV,
+                            help='The iv for AES decryption. This can be a string (or hex of length 16)')
+    parser.add_argument('--random', action='store_true',
+                            help='Randomly generate a key/iv pair for use with AES. Only useful for -send')
+    
+    args = parser.parse_args()
+    
+    key = args.key[0]
+    iv = args.iv[0]
+    if args.random:
+        key = random.randbytes(32)
+        iv = random.randbytes(16)
+    elif len(key) == 64:
+        key = binascii.unhexlify(key)
+        iv = binascii.unhexlify(iv)
+    
+    giffile = args.infile
+
+    with open(giffile, 'rb') as f:
+        rawdata = f.read()
+    
+    print('[+] MD5 of original GIF: {}'.format(hashlib.md5(rawdata).hexdigest()))
+    
+    print('[+] Attempting to parse {} as a GIF98a'.format(giffile))
+    offset_info = parse_gif(rawdata)
+    
+    if args.encode:
+        #Check if the input is a file or text
+        if os.path.exists(args.encode):
+            print('[+] Reading from file: {}'.format(args.encode))
+            with open(args.encode, 'rb') as f:
+                datatoencode = f.read()
+        else:
+            print('[+] Using text from cli: "{}"'.format(args.encode))
+            datatoencode = (args.encode).encode()
+            
+        commentstruct = make_comment(datatoencode, key, iv)
+        randoff = random.choice(offset_info[0x21])
+        
+        print('[+] Inserting comment at offset: {}'.format(randoff))
+        
+        splita = rawdata[:randoff]
+        splitb = rawdata[randoff:]
+        
+        newgif = splita+commentstruct+splitb
+        
+        outfile = giffile+'_out.gif'
+        if args.newgif:
+            outfile = args.newgif
+        
+        print('[+] MD5 of new GIF: {}'.format(hashlib.md5(newgif).hexdigest()))
+        
+        print('[+] Writing gif to: {}'.format(outfile))
+        with open(outfile, 'wb') as f:
+            f.write(newgif)
+    
+    elif args.decode:
+        offsets, comments = find_comments(rawdata, offset_info, key, iv)
+        for i in comments:
+            print('{}: {}'.format(i[0], i[1]))
+            
+    elif args.extract:
+        offsets, comments = find_comments(rawdata, offset_info, key, iv)
+        for i in comments:
+            if not i[1]:
+                continue
+            outfile = giffile+'_out'
+            if args.newgif:
+                outfile = args.newgif
+            
+            p, f = os.path.split(outfile)
+            outfile = os.path.join(p, f'{i[0]}_{f}')
+            
+            print('[+] MD5 of comment {}: {}'.format(i[0], hashlib.md5(i[1]).hexdigest()))
+            
+            print('[+] Writing {} to: {}'.format(i[0], outfile))
+            with open(outfile, 'wb') as f:
+                f.write(i[1])
+                
+    elif args.clean:
+        offsets, comments = find_comments(rawdata, offset_info)
+        c = 0
+        newgif = rawdata
+        for i in offsets[::-1]:
+            print('[+] Cleaning comment from offset range {}:{}'.format(i[0], i[1]))
+            newgif = newgif[:i[0]]+newgif[i[1]:]
+            
+        outfile = giffile+'_out.gif'
+        if args.newgif:
+            outfile = args.newgif
+            
+        print('[+] MD5 of new GIF: {}'.format(hashlib.md5(newgif).hexdigest()))
+            
+        print('[+] Writing gif to: {}'.format(outfile))
+        with open(outfile, 'wb') as f:
+            f.write(newgif)
+
+if __name__ == '__main__':
+    main()
