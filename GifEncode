@@ -527,7 +527,7 @@ def main():
                 f.write(i[1])
                 
     elif args.clean:
-        offsets, comments = find_comments(rawdata, offset_info)
+        offsets, comments = find_comments(rawdata, offset_info, key, iv)
         c = 0
         newgif = rawdata
         for i in offsets[::-1]:
