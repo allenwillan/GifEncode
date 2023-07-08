@@ -27,6 +27,7 @@ I believe that there may be other ways to hide data within the format (possibly 
 3. Support testing - Testing to ensure that the Comment Extensions don't get stripped or flagged anywhere would be ideal. It at the least works through Giphy hosting as well as simply sending via Discord.
 
 # Resources
+* https://youtu.be/w4FuIviJJ6o - Overview video
 * https://www.w3.org/Graphics/GIF/spec-gif89a.txt - The specification for GIF89a, which was used to build the parser
 * https://www.fileformat.info/format/gif/egff.htm - Useful information about the GIF format, to include some helpful images
 * https://giflib.sourceforge.net/whatsinagif/bits_and_bytes.html - A helpful breakdown of some aspects of the GIF format
